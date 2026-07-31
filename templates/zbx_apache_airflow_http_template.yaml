@@ -1,0 +1,372 @@
+zabbix_export:
+  version: '6.0'
+  date: '2026-07-31T12:00:00Z'
+  groups:
+    - uuid: 6f082cc51b744663a30f35554010235a
+      name: Templates/Applications
+  templates:
+    - uuid: 098236bfb0b84746b0e15a9349c8f024
+      template: Apache Airflow by HTTP
+      name: Apache Airflow by HTTP
+      description: |
+        Monitors Apache Airflow 2.x through the stable REST API (/api/v1), agentless (HTTP agent items only).
+
+        Features:
+        - Instance health: metadatabase and scheduler status via /health
+        - Airflow version tracking via /version
+        - Low-Level Discovery of DAGs via /dags, with optional filtering by Airflow DAG tag
+        - Per-DAG items: last DAG run state and last task instance state
+        - Triggers for failed DAG runs, failed tasks, unhealthy scheduler/metadatabase and API silence (nodata watchdog)
+
+        Works with any Airflow 2.x deployment exposing the stable REST API, including
+        Google Cloud Composer, Amazon MWAA and self-managed installations.
+
+        Setup: set {$AIRFLOW.API.URL} and {$AIRFLOW.API.TOKEN} at host level. See README:
+        https://github.com/tsleite/zabbix-template-apache-airflow
+
+        Author: Tiago Silva Leite
+        License: MIT
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: f5bf6ca92fa94d4e83907b83ff90e1c6
+          name: 'Airflow: Get instance health'
+          type: HTTP_AGENT
+          key: airflow.health.get
+          delay: 1m
+          history: '0'
+          trends: '0'
+          value_type: TEXT
+          description: |
+            Master item. Collects the health payload from GET {$AIRFLOW.API.URL}/health.
+            Reference: https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/check-health.html
+          timeout: '{$AIRFLOW.API.TIMEOUT}'
+          url: '{$AIRFLOW.API.URL}/health'
+          headers:
+            - name: Authorization
+              value: 'Bearer {$AIRFLOW.API.TOKEN}'
+            - name: Content-Type
+              value: application/json
+          tags:
+            - tag: component
+              value: health
+        - uuid: ab155d07644a4d40866bc1922c57deae
+          name: 'Airflow: Metadatabase status'
+          type: DEPENDENT
+          key: airflow.health.metadatabase
+          delay: '0'
+          history: 2w
+          trends: '0'
+          value_type: CHAR
+          description: 'Status of the Airflow metadata database reported by /health (healthy/unhealthy).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.metadatabase.status
+              error_handler: CUSTOM_VALUE
+              error_handler_params: unknown
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 15m
+          master_item:
+            key: airflow.health.get
+          tags:
+            - tag: component
+              value: health
+          triggers:
+            - uuid: aea6a0556e4c4b37a253f2951767a1fa
+              expression: 'last(/Apache Airflow by HTTP/airflow.health.metadatabase)<>"healthy"'
+              name: 'Airflow: metadatabase is unhealthy'
+              opdata: 'status: {ITEM.LASTVALUE1}'
+              priority: HIGH
+              description: 'The Airflow metadata database is not reported as healthy by the /health endpoint.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: b1f200c3854e471a9bb3e849e0f7a586
+              expression: 'nodata(/Apache Airflow by HTTP/airflow.health.metadatabase,30m)=1'
+              name: 'Airflow: no data from REST API for 30 minutes'
+              priority: WARNING
+              description: |
+                Watchdog: Zabbix has not received health data from the Airflow REST API.
+                Check network connectivity, the API token ({$AIRFLOW.API.TOKEN}) and the webserver.
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: ed47c760cd1a410e8eb7a53edf988cc5
+          name: 'Airflow: Scheduler status'
+          type: DEPENDENT
+          key: airflow.health.scheduler
+          delay: '0'
+          history: 2w
+          trends: '0'
+          value_type: CHAR
+          description: 'Status of the Airflow scheduler reported by /health (healthy/unhealthy). An unhealthy scheduler means no new task gets scheduled.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.scheduler.status
+              error_handler: CUSTOM_VALUE
+              error_handler_params: unknown
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 15m
+          master_item:
+            key: airflow.health.get
+          tags:
+            - tag: component
+              value: health
+          triggers:
+            - uuid: 6b31c29c32044d1fa481af64b9d5e0ed
+              expression: 'last(/Apache Airflow by HTTP/airflow.health.scheduler)<>"healthy"'
+              name: 'Airflow: scheduler is unhealthy'
+              opdata: 'status: {ITEM.LASTVALUE1}'
+              priority: HIGH
+              description: 'The scheduler heartbeat is stale or the scheduler is down. DAGs will not be scheduled.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: d66f02570d6c45d8a6da8b222ac1a617
+          name: 'Airflow: Version'
+          type: HTTP_AGENT
+          key: airflow.version
+          delay: 1h
+          history: 2w
+          trends: '0'
+          value_type: CHAR
+          description: 'Airflow version from GET /version. Useful for CVE/patch tracking.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.version
+              error_handler: CUSTOM_VALUE
+              error_handler_params: unknown
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          timeout: '{$AIRFLOW.API.TIMEOUT}'
+          url: '{$AIRFLOW.API.URL}/version'
+          headers:
+            - name: Authorization
+              value: 'Bearer {$AIRFLOW.API.TOKEN}'
+            - name: Content-Type
+              value: application/json
+          tags:
+            - tag: component
+              value: application
+      discovery_rules:
+        - uuid: 144c6c41d347447789c9284e52b1980a
+          name: 'Airflow: DAG discovery'
+          type: HTTP_AGENT
+          key: airflow.dags.discovery
+          delay: 10m
+          lifetime: 3d
+          description: |
+            Discovers DAGs via GET {$AIRFLOW.API.URL}/dags.
+            Optional filtering by Airflow DAG tag through {$AIRFLOW.DISCOVERY.TAG} (empty = discover all DAGs).
+            By default only unpaused DAGs generate items (see {$AIRFLOW.LLD.FILTER.PAUSED.MATCHES}).
+            Reference: https://airflow.apache.org/docs/apache-airflow/stable/stable-rest-api-ref.html#operation/get_dags
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#IS_PAUSED}'
+                value: '{$AIRFLOW.LLD.FILTER.PAUSED.MATCHES}'
+                formulaid: A
+          item_prototypes:
+            - uuid: 97d6995c871c40098dfca4ce0d5de4d1
+              name: 'DAG [{#DAG_ID}]: Last DAG run state'
+              type: HTTP_AGENT
+              key: 'airflow.dag.run.state[{#DAG_ID}]'
+              delay: '{$AIRFLOW.DAG.CHECK.INTERVAL}'
+              history: 2w
+              trends: '0'
+              value_type: CHAR
+              description: |
+                State of the most recent DAG run (queued | running | success | failed).
+                Source: GET /dags/{#DAG_ID}/dagRuns?order_by=-execution_date&limit=1
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.dag_runs[0].state'
+                  error_handler: CUSTOM_VALUE
+                  error_handler_params: no_runs
+              timeout: '{$AIRFLOW.API.TIMEOUT}'
+              url: '{$AIRFLOW.API.URL}/dags/{#DAG_ID}/dagRuns'
+              query_fields:
+                - name: order_by
+                  value: '-execution_date'
+                - name: limit
+                  value: '1'
+              headers:
+                - name: Authorization
+                  value: 'Bearer {$AIRFLOW.API.TOKEN}'
+                - name: Content-Type
+                  value: application/json
+              tags:
+                - tag: component
+                  value: dag
+                - tag: dag_id
+                  value: '{#DAG_ID}'
+                - tag: owner
+                  value: '{#OWNERS}'
+                - tag: team
+                  value: '{#TAG0}'
+              trigger_prototypes:
+                - uuid: e234938ee72e48f691057cec24fa12c4
+                  expression: 'last(/Apache Airflow by HTTP/airflow.dag.run.state[{#DAG_ID}])="failed"'
+                  name: 'Airflow: DAG {#DAG_ID}: last run failed'
+                  opdata: 'state: {ITEM.LASTVALUE1}'
+                  priority: AVERAGE
+                  description: |
+                    The most recent run of DAG {#DAG_ID} finished in "failed" state.
+                    Owner(s): {#OWNERS}. Schedule: {#SCHEDULE_INTERVAL}.
+                    The trigger resolves automatically when a newer run succeeds.
+                  manual_close: 'YES'
+                  tags:
+                    - tag: dag_id
+                      value: '{#DAG_ID}'
+                    - tag: owner
+                      value: '{#OWNERS}'
+                    - tag: scope
+                      value: workload
+                    - tag: team
+                      value: '{#TAG0}'
+            - uuid: d323d7f6953f4d8984155559caddef10
+              name: 'DAG [{#DAG_ID}]: Last task instance state'
+              type: HTTP_AGENT
+              key: 'airflow.dag.task.state[{#DAG_ID}]'
+              delay: '{$AIRFLOW.DAG.CHECK.INTERVAL}'
+              history: 2w
+              trends: '0'
+              value_type: CHAR
+              description: |
+                State of the most recent task instance across the DAG runs of {#DAG_ID}.
+                Catches task-level failures even when the DAG run is still "running".
+                Source: GET /dags/{#DAG_ID}/dagRuns/~/taskInstances
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.task_instances[-1:]'
+                  error_handler: CUSTOM_VALUE
+                  error_handler_params: api_error
+                - type: JSONPATH
+                  parameters:
+                    - '$..state.first()'
+                  error_handler: CUSTOM_VALUE
+                  error_handler_params: no_tasks
+              timeout: '{$AIRFLOW.API.TIMEOUT}'
+              url: '{$AIRFLOW.API.URL}/dags/{#DAG_ID}/dagRuns/~/taskInstances'
+              headers:
+                - name: Authorization
+                  value: 'Bearer {$AIRFLOW.API.TOKEN}'
+                - name: Content-Type
+                  value: application/json
+              tags:
+                - tag: component
+                  value: task
+                - tag: dag_id
+                  value: '{#DAG_ID}'
+                - tag: owner
+                  value: '{#OWNERS}'
+                - tag: team
+                  value: '{#TAG0}'
+              trigger_prototypes:
+                - uuid: 674a909c348a4d9e828321e55b2345e3
+                  expression: 'last(/Apache Airflow by HTTP/airflow.dag.task.state[{#DAG_ID}])="failed"'
+                  name: 'Airflow: DAG {#DAG_ID}: task instance failed'
+                  opdata: 'state: {ITEM.LASTVALUE1}'
+                  priority: AVERAGE
+                  description: |
+                    The most recent task instance of DAG {#DAG_ID} is in "failed" state.
+                    Owner(s): {#OWNERS}.
+                  manual_close: 'YES'
+                  tags:
+                    - tag: dag_id
+                      value: '{#DAG_ID}'
+                    - tag: owner
+                      value: '{#OWNERS}'
+                    - tag: scope
+                      value: workload
+                    - tag: team
+                      value: '{#TAG0}'
+          timeout: '{$AIRFLOW.API.TIMEOUT}'
+          url: '{$AIRFLOW.API.URL}/dags'
+          query_fields:
+            - name: limit
+              value: '{$AIRFLOW.DISCOVERY.DAGS.LIMIT}'
+            - name: only_active
+              value: '{$AIRFLOW.DISCOVERY.ONLY_ACTIVE}'
+          headers:
+            - name: Authorization
+              value: 'Bearer {$AIRFLOW.API.TOKEN}'
+            - name: Content-Type
+              value: application/json
+          lld_macro_paths:
+            - lld_macro: '{#DAG_ID}'
+              path: $.dag_id
+            - lld_macro: '{#DESCRIPTION}'
+              path: $.description
+            - lld_macro: '{#IS_ACTIVE}'
+              path: $.is_active
+            - lld_macro: '{#IS_PAUSED}'
+              path: $.is_paused
+            - lld_macro: '{#OWNERS}'
+              path: '$.owners.first()'
+            - lld_macro: '{#SCHEDULE_INTERVAL}'
+              path: $.schedule_interval.value
+            - lld_macro: '{#TAG0}'
+              path: '$.tags[0].name'
+            - lld_macro: '{#TAG1}'
+              path: '$.tags[1].name'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  // Filter discovered DAGs by an Airflow DAG tag.
+                  // {$AIRFLOW.DISCOVERY.TAG} empty => discover every DAG returned by the API.
+                  var filterTag = '{$AIRFLOW.DISCOVERY.TAG}';
+                  var dags = JSON.parse(value).dags || [];
+                  var result = [];
+
+                  for (var i = 0; i < dags.length; i++) {
+                      if (filterTag === '') {
+                          result.push(dags[i]);
+                          continue;
+                      }
+                      var tags = dags[i].tags || [];
+                      for (var j = 0; j < tags.length; j++) {
+                          if (tags[j].name === filterTag) {
+                              result.push(dags[i]);
+                              break;
+                          }
+                      }
+                  }
+                  return JSON.stringify(result);
+      macros:
+        - macro: '{$AIRFLOW.API.TIMEOUT}'
+          value: 15s
+          description: 'Timeout for every HTTP agent request against the Airflow REST API.'
+        - macro: '{$AIRFLOW.API.TOKEN}'
+          type: SECRET_TEXT
+          description: 'Bearer token sent in the Authorization header. See README for Google Cloud Composer / self-managed options.'
+        - macro: '{$AIRFLOW.API.URL}'
+          value: 'https://airflow.example.com/api/v1'
+          description: 'Base URL of the Airflow stable REST API, without trailing slash. Ex.: https://<composer-webserver>/api/v1'
+        - macro: '{$AIRFLOW.DAG.CHECK.INTERVAL}'
+          value: 5m
+          description: 'Collection interval of the per-DAG items (2 HTTP requests per DAG per cycle).'
+        - macro: '{$AIRFLOW.DISCOVERY.DAGS.LIMIT}'
+          value: '100'
+          description: 'Page size for GET /dags. Capped server-side by Airflow [api] maximum_page_limit (default 100).'
+        - macro: '{$AIRFLOW.DISCOVERY.ONLY_ACTIVE}'
+          value: 'true'
+          description: 'only_active query parameter of GET /dags (true = exclude deleted/inactive DAGs).'
+        - macro: '{$AIRFLOW.DISCOVERY.TAG}'
+          value: ''
+          description: 'Discover only DAGs carrying this Airflow DAG tag (ex.: monitored_by_zabbix). Empty = discover all DAGs.'
+        - macro: '{$AIRFLOW.LLD.FILTER.PAUSED.MATCHES}'
+          value: 'false'
+          description: 'LLD filter on {#IS_PAUSED}. Default "false" monitors only unpaused DAGs. Set to "true|false" to monitor paused DAGs too.'
